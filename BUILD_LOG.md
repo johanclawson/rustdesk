@@ -211,4 +211,18 @@ I walked engine hashes for every Flutter 3.27…3.44 stable + 3.42/3.43 betas; o
   3. `flutter/lib/desktop/widgets/tabbar_widget.dart`: drop `hide TabBarTheme` from the material.dart import (the symbol no longer exists; nothing else in this file references it).
   4. Add `flutter/**` and `libs/**` to the workflow's `paths:` trigger so Dart/Rust source changes re-run CI without a workflow edit.
 - Open question: there may be more 3.24→3.44 API drift past these three points. We'll know after the run.
+- Run: https://github.com/johanclawson/rustdesk/actions/runs/26502756584
+- Result: ❌ failed *earlier* than before — the **bridge** job (not the ARM64 job) now fails. The bumped `extended_text ^15.0.2` requires Dart 3.7+, but `bridge.yml` runs on Flutter 3.22.3 (Dart 3.4.4):
+  ```
+  The current Dart SDK version is 3.4.4.
+  Because flutter_hbb depends on extended_text >=14.0.0 which requires SDK version >=3.5.0 <4.0.0,
+  version solving failed.
+  ```
+  Bridge already had a `sed -i 's/extended_text: 14.0.0/extended_text: 13.0.0/g' pubspec.yaml` workaround for its own old Dart, but my new pubspec line `extended_text: ^15.0.2` doesn't match that pattern, and the same problem now also applies to `google_fonts: ^8.0.0`.
+
+### Attempt 8 — extend the bridge sed to back-port our pubspec bumps
+
+- Plan:
+  - In `bridge.yml`, broaden the sed to also rewrite `extended_text: ^15.x` → `13.0.0` and `google_fonts: ^8.x` → `^6.2.1` just for the bridge run. The actual ARM64 build still sees the real `^15.0.2` / `^8.0.0`.
+- This change to bridge.yml is bridge-job-local — the generated bridge files only depend on `src/flutter_ffi.rs`, not on which pubspec versions resolve.
 - Commit: pending
