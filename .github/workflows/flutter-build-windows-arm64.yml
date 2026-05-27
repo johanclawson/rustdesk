@@ -38,10 +38,11 @@ env:
   # from git (no bundled dart-sdk) and let its own update_dart_sdk.ps1 fetch
   # the arm64 sdk based on $env:PROCESSOR_ARCHITECTURE, which is "ARM64" in
   # native pwsh on the windows-11-arm runner.
-  FLUTTER_VERSION: "3.44.0"
-  # Pinned commit of the 3.44.0 tag; tags on flutter/flutter are immutable in
-  # practice but git tags can be force-pushed, so we anchor by sha.
-  FLUTTER_COMMIT: "559ffa3f75e7402d65a8def9c28389a9b2e6fe42"
+  #
+  # Pinned commit of the 3.44.0 tag; tags on flutter/flutter are immutable
+  # in practice but a git tag can still be force-pushed, so we anchor by
+  # sha. Update both the version comment and the sha together if bumping.
+  FLUTTER_COMMIT: "559ffa3f75e7402d65a8def9c28389a9b2e6fe42"  # tags/3.44.0
   VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
   VCPKG_COMMIT_ID: "120deac3062162151622ca4860575a33844ba10b"
 
@@ -74,7 +75,15 @@ jobs:
           name: bridge-artifact
           path: ./
 
-      - name: Diagnose runner environment
+      - name: Diagnose runner environment + assert native ARM64 host
+        # We rely on three things being native ARM64 on this runner:
+        # 1. pwsh, so update_dart_sdk.ps1 sees PROCESSOR_ARCHITECTURE=ARM64;
+        # 2. python, so build.py's platform.machine() picks the arm64 Flutter
+        #    output dir; if a future image bundles x64 python we'd silently
+        #    write to build/windows/x64/... and fail with a confusing error;
+        # 3. the Dart VM we install next, which is decided by (1).
+        # Fail loudly here if any of those is x64 so the failure mode is
+        # obvious in the log instead of a missing-directory error later.
         shell: pwsh
         run: |
           Write-Host "RUNNER_ARCH = $env:RUNNER_ARCH"
@@ -83,6 +92,14 @@ jobs:
           Write-Host "PROCESSOR_ARCHITEW6432 = $env:PROCESSOR_ARCHITEW6432"
           Write-Host "OSArchitecture: $([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)"
           Write-Host "ProcessArchitecture: $([System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture)"
+          if ($env:PROCESSOR_ARCHITECTURE -ne 'ARM64') {
+            throw "Expected native ARM64 pwsh (PROCESSOR_ARCHITECTURE=ARM64); got '$env:PROCESSOR_ARCHITECTURE'. The Flutter / Dart bootstrap would mis-detect the host."
+          }
+          $pyArch = python -c "import platform; print(platform.machine())"
+          Write-Host "python platform.machine() = $pyArch"
+          if ($pyArch -notin @('ARM64','arm64','aarch64')) {
+            throw "Expected native ARM64 python on the runner; got '$pyArch'. build.py would write Flutter output to the wrong arch subdir."
+          }
 
       - name: Install LLVM and Clang (woa64 / ARM64 native)
         # KyleMayes/install-llvm-action v1 ships an x64 libclang.dll on this
@@ -185,16 +202,25 @@ jobs:
         env:
           VCPKG_DEFAULT_HOST_TRIPLET: arm64-windows-static
         run: |
-          & "$env:VCPKG_ROOT\vcpkg.exe" install `
-            --triplet arm64-windows-static `
-            --x-install-root="$env:VCPKG_ROOT\installed"
-          if ($LASTEXITCODE -ne 0) {
+          # GitHub Actions' pwsh wrapper enables both $ErrorActionPreference
+          # = 'stop' and $PSNativeCommandUseErrorActionPreference = $true on
+          # pwsh >=7.3, which turns a non-zero native exit into a thrown
+          # exception. Without try/catch the step would die before we could
+          # dump the vcpkg build logs — exactly the diagnostic the previous
+          # bash version preserved. Catch + dump + re-throw.
+          try {
+            & "$env:VCPKG_ROOT\vcpkg.exe" install `
+              --triplet arm64-windows-static `
+              --x-install-root="$env:VCPKG_ROOT\installed"
+            if ($LASTEXITCODE -ne 0) { throw "vcpkg install exited $LASTEXITCODE" }
+          } catch {
+            Write-Host "::error::vcpkg install failed: $_"
             Get-ChildItem -Path $env:VCPKG_ROOT -Recurse -Filter *.log -ErrorAction SilentlyContinue | ForEach-Object {
               Write-Host "::group::$($_.FullName)"
               Get-Content -Raw $_.FullName
               Write-Host "::endgroup::"
             }
-            exit 1
+            throw
           }
 
       - name: Alias x64-windows-static → arm64-windows-static
@@ -217,19 +243,19 @@ jobs:
           Get-ChildItem $x64 | Select-Object -First 5 Name
 
       - name: Build RustDesk (flutter, ARM64, no hwcodec/vram)
-        # First attempt deliberately disables hwcodec / vram features — those
-        # bring in x86-tuned native code (nasm, nvenc) and are most likely to
-        # fail first. Once base build is green we can layer them back in.
+        # We deliberately disable hwcodec / vram features for this first
+        # build: they pull in x86-tuned native code (nasm, NVENC, QSV) and
+        # would block the base build. Layer them back in once upstream
+        # rustdesk-org/hwcodec gains arm64-windows triplet awareness.
+        #
+        # `flutter build windows` picks its target from `Abi.current()` in
+        # dart:ffi (a compile-time property of the bundled Dart VM); with the
+        # ARM64 dart-sdk installed by the bootstrap step above it builds
+        # windows-arm64 automatically.
         #
         # SODIUM_LIB_DIR makes libsodium-sys 0.2.x skip its built-in MSVC
         # "download a prebuilt libsodium.lib" path (which only exists for
-        # x86/x64) and instead link the libsodium we installed via vcpkg for
-        # arm64-windows-static.
-        # `flutter build windows` picks its target from Abi.current(), and we
-        # run an ARM64 dart VM here, so it builds windows-arm64 automatically.
-        # SODIUM_LIB_DIR makes libsodium-sys 0.2.x skip its built-in MSVC
-        # "download a prebuilt libsodium.lib" path (which only exists for
-        # x86/x64) and instead link the libsodium we installed via vcpkg for
+        # x86/x64) and link the libsodium that vcpkg just built for
         # arm64-windows-static.
         env:
           VCPKG_DEFAULT_HOST_TRIPLET: arm64-windows-static
