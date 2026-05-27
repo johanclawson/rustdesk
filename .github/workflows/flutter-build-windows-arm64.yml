@@ -159,6 +159,25 @@ jobs:
           head -n 100 "${VCPKG_ROOT}/buildtrees/ffmpeg/build-arm64-windows-static-rel-out.log" || true
         shell: bash
 
+      - name: Alias x64-windows-static → arm64-windows-static
+        # Several rustdesk-org sys crates (magnum-opus, hwcodec, ...) hard-code
+        # `x64-windows-static` for any Windows target. We can't fix those from
+        # this repo, so we make the path they look at *be* the arm64 install
+        # via an NTFS directory junction. The libs they then load are ARM64
+        # because that's actually what we installed.
+        shell: pwsh
+        run: |
+          $arm = "C:\vcpkg\installed\arm64-windows-static"
+          $x64 = "C:\vcpkg\installed\x64-windows-static"
+          if (-not (Test-Path $arm)) { throw "expected arm64 install at $arm" }
+          if (Test-Path $x64) {
+            Write-Host "removing pre-existing $x64"
+            Remove-Item -Recurse -Force $x64
+          }
+          cmd /c mklink /J `"$x64`" `"$arm`"
+          Write-Host "junction created: $x64 -> $arm"
+          Get-ChildItem $x64 | Select-Object -First 5 Name
+
       - name: Build RustDesk (flutter, ARM64, no hwcodec/vram)
         # First attempt deliberately disables hwcodec / vram features — those
         # bring in x86-tuned native code (nasm, nvenc) and are most likely to
