@@ -10,40 +10,40 @@ name: Build the flutter version of RustDesk for Windows ARM64
 
 on:
   workflow_dispatch:
-    inputs:
-      upload-tag:
-        type: string
-        default: "nightly-arm64"
   push:
     branches:
       - feat/windows-arm64-ci
     paths:
       - ".github/workflows/flutter-build-windows-arm64.yml"
+      - ".github/workflows/bridge.yml"
       - "build.py"
       - ".cargo/config.toml"
       - "vcpkg.json"
-      - "flutter/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "build.rs"
+      - "src/**"
       - "libs/**"
+      - "flutter/**"
 
 env:
-  # Pinned to the same versions the existing x64 build uses, so the only axis
-  # of difference is the target architecture.
-  RUST_VERSION: "1.75"
-  LLVM_VERSION: "15.0.6"
-  # Flutter's `build windows` target is decided by the host arch (Abi.current()
-  # in dart:ffi — a compile-time property of the bundled Dart VM). To produce
-  # a windows-arm64 build we therefore need an arm64 Dart VM.  We install
-  # Flutter from git (no bundled dart-sdk) and let its own update_dart_sdk.ps1
-  # fetch the arm64 sdk based on $env:PROCESSOR_ARCHITECTURE — which is "ARM64"
-  # in native pwsh on the windows-11-arm runner.
-  #
-  # 3.44.0 is the first stable whose engine ships windows-arm64 artifacts
-  # (dart-sdk-windows-arm64.zip, windows-arm64-flutter.zip, etc.).
+  RUST_VERSION: "1.75"            # matches flutter-build.yml
+  LLVM_VERSION: "15.0.6"          # matches flutter-build.yml
+  # flutter-build.yml pins Flutter 3.24.5; for windows-arm64 we need 3.44.0,
+  # the first stable whose engine ships the required artifacts
+  # (dart-sdk-windows-arm64.zip, windows-arm64-flutter.zip, …).  `build
+  # windows` decides target arch from Abi.current() in dart:ffi — a
+  # compile-time property of the bundled Dart VM — so to produce a
+  # windows-arm64 binary we must run an arm64 Dart VM.  We install Flutter
+  # from git (no bundled dart-sdk) and let its own update_dart_sdk.ps1 fetch
+  # the arm64 sdk based on $env:PROCESSOR_ARCHITECTURE, which is "ARM64" in
+  # native pwsh on the windows-11-arm runner.
   FLUTTER_VERSION: "3.44.0"
+  # Pinned commit of the 3.44.0 tag; tags on flutter/flutter are immutable in
+  # practice but git tags can be force-pushed, so we anchor by sha.
+  FLUTTER_COMMIT: "559ffa3f75e7402d65a8def9c28389a9b2e6fe42"
   VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
   VCPKG_COMMIT_ID: "120deac3062162151622ca4860575a33844ba10b"
-  VERSION: "1.4.6"
-  TAG_NAME: "${{ inputs.upload-tag || 'nightly-arm64' }}"
 
 jobs:
   # Reuse the existing Linux-based bridge generation job — its output is
@@ -87,17 +87,25 @@ jobs:
       - name: Install LLVM and Clang (woa64 / ARM64 native)
         # KyleMayes/install-llvm-action v1 ships an x64 libclang.dll on this
         # runner — bindgen then refuses to load it ("invalid DLL (x86-64)").
-        # Install the official LLVM-on-Windows-ARM64 build directly instead.
+        # Install the official LLVM-on-Windows-ARM64 build directly instead,
+        # pinned by sha256 so we don't silently follow a re-uploaded asset.
         shell: pwsh
+        env:
+          LLVM_WOA64_SHA256: 79D18B9498D7A6C36114F0277C83C91CAF9258194C683A73E5886B68B4D304D1
         run: |
           $url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-${env:LLVM_VERSION}/LLVM-${env:LLVM_VERSION}-woa64.exe"
+          $installer = "$env:RUNNER_TEMP\llvm-installer.exe"
           Write-Host "Downloading $url"
-          Invoke-WebRequest -Uri $url -OutFile "$env:RUNNER_TEMP\llvm-installer.exe"
-          Start-Process -FilePath "$env:RUNNER_TEMP\llvm-installer.exe" -ArgumentList '/S' -Wait -NoNewWindow
+          Invoke-WebRequest -Uri $url -OutFile $installer
+          $actual = (Get-FileHash $installer -Algorithm SHA256).Hash
+          if ($actual -ne $env:LLVM_WOA64_SHA256) {
+            throw "LLVM installer sha256 mismatch: expected $env:LLVM_WOA64_SHA256, got $actual"
+          }
+          Start-Process -FilePath $installer -ArgumentList '/S' -Wait -NoNewWindow
           $llvmBin = "C:\Program Files\LLVM\bin"
-          "LIBCLANG_PATH=$llvmBin"     | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "LLVM_PATH=C:\Program Files\LLVM" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          $llvmBin | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          "LIBCLANG_PATH=$llvmBin"     | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8NoBOM
+          "LLVM_PATH=C:\Program Files\LLVM" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8NoBOM
+          $llvmBin | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8NoBOM
           & "$llvmBin\clang.exe" --version
 
       - name: Install Flutter from git (lets bootstrap pick ARM64 dart-sdk)
@@ -111,7 +119,10 @@ jobs:
         run: |
           $flutterRoot = "C:\flutter"
           if (Test-Path $flutterRoot) { Remove-Item -Recurse -Force $flutterRoot }
-          git clone --depth=1 --branch ${env:FLUTTER_VERSION} https://github.com/flutter/flutter.git $flutterRoot
+          # Clone shallow at the pinned commit (mutable tag would be unsafe).
+          git clone --filter=blob:none --no-checkout https://github.com/flutter/flutter.git $flutterRoot
+          git -C $flutterRoot fetch --depth=1 origin ${env:FLUTTER_COMMIT}
+          git -C $flutterRoot checkout --detach ${env:FLUTTER_COMMIT}
           "$flutterRoot\bin"                              | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
           "$flutterRoot\bin\cache\dart-sdk\bin"           | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
           $env:Path = "$flutterRoot\bin;$flutterRoot\bin\cache\dart-sdk\bin;$env:Path"
@@ -136,16 +147,25 @@ jobs:
         # without `--target` produces x86_64 binaries, which makes magnum-opus
         # pick up the wrong vcpkg triplet. Install rustup with the aarch64
         # default-host flavour so cargo natively targets ARM64.
+        # rustup-init.exe is pinned by sha256 (re-fetch and update if rustup
+        # publishes a new build).
         shell: pwsh
+        env:
+          RUSTUP_INIT_SHA256: 3af309e6c3062aa11df0e932954f69d13b734d8a431e593812f3ecd9ff9e6ef6
         run: |
           $url = "https://static.rust-lang.org/rustup/dist/aarch64-pc-windows-msvc/rustup-init.exe"
-          Invoke-WebRequest -Uri $url -OutFile "$env:RUNNER_TEMP\rustup-init.exe"
-          & "$env:RUNNER_TEMP\rustup-init.exe" -y `
+          $installer = "$env:RUNNER_TEMP\rustup-init.exe"
+          Invoke-WebRequest -Uri $url -OutFile $installer
+          $actual = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $env:RUSTUP_INIT_SHA256) {
+            throw "rustup-init sha256 mismatch: expected $env:RUSTUP_INIT_SHA256, got $actual"
+          }
+          & $installer -y `
             --default-host aarch64-pc-windows-msvc `
             --default-toolchain ${env:RUST_VERSION} `
             --profile minimal `
             --component rustfmt
-          "$env:USERPROFILE\.cargo\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          "$env:USERPROFILE\.cargo\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8NoBOM
           & "$env:USERPROFILE\.cargo\bin\rustup.exe" target add aarch64-pc-windows-msvc
           & "$env:USERPROFILE\.cargo\bin\rustup.exe" show
 
@@ -161,24 +181,21 @@ jobs:
           doNotCache: false
 
       - name: Install vcpkg dependencies (arm64-windows-static)
+        shell: pwsh
         env:
           VCPKG_DEFAULT_HOST_TRIPLET: arm64-windows-static
         run: |
-          if ! $VCPKG_ROOT/vcpkg \
-            install \
-            --triplet arm64-windows-static \
-            --x-install-root="$VCPKG_ROOT/installed"; then
-            find "${VCPKG_ROOT}/" -name "*.log" | while read -r _1; do
-              echo "$_1:"
-              echo "======"
-              cat "$_1"
-              echo "======"
-              echo ""
-            done
+          & "$env:VCPKG_ROOT\vcpkg.exe" install `
+            --triplet arm64-windows-static `
+            --x-install-root="$env:VCPKG_ROOT\installed"
+          if ($LASTEXITCODE -ne 0) {
+            Get-ChildItem -Path $env:VCPKG_ROOT -Recurse -Filter *.log -ErrorAction SilentlyContinue | ForEach-Object {
+              Write-Host "::group::$($_.FullName)"
+              Get-Content -Raw $_.FullName
+              Write-Host "::endgroup::"
+            }
             exit 1
-          fi
-          head -n 100 "${VCPKG_ROOT}/buildtrees/ffmpeg/build-arm64-windows-static-rel-out.log" || true
-        shell: bash
+          }
 
       - name: Alias x64-windows-static → arm64-windows-static
         # Several rustdesk-org sys crates (magnum-opus, hwcodec, ...) hard-code
@@ -208,31 +225,52 @@ jobs:
         # "download a prebuilt libsodium.lib" path (which only exists for
         # x86/x64) and instead link the libsodium we installed via vcpkg for
         # arm64-windows-static.
+        # `flutter build windows` picks its target from Abi.current(), and we
+        # run an ARM64 dart VM here, so it builds windows-arm64 automatically.
+        # SODIUM_LIB_DIR makes libsodium-sys 0.2.x skip its built-in MSVC
+        # "download a prebuilt libsodium.lib" path (which only exists for
+        # x86/x64) and instead link the libsodium we installed via vcpkg for
+        # arm64-windows-static.
         env:
           VCPKG_DEFAULT_HOST_TRIPLET: arm64-windows-static
-          RUSTDESK_TARGET_ARCH: arm64
-          # `flutter build windows` picks its target from Abi.current(), and we
-          # now run an ARM64 dart VM, so it builds windows-arm64 automatically.
           SODIUM_LIB_DIR: C:\vcpkg\installed\arm64-windows-static\lib
         run: |
           python .\build.py --portable --flutter --skip-portable-pack
         shell: pwsh
 
-      - name: Stage release tree
+      - name: Stage release tree (require ARM64 output)
         shell: pwsh
         run: |
-          $arm = ".\flutter\build\windows\arm64\runner\Release"
-          $x64 = ".\flutter\build\windows\x64\runner\Release"
-          $src = if (Test-Path $arm) { $arm } elseif (Test-Path $x64) { $x64 } else { $null }
-          if (-not $src) {
-            Write-Error "No Flutter Release directory found under flutter/build/windows/"
+          $src = ".\flutter\build\windows\arm64\runner\Release"
+          if (-not (Test-Path $src)) {
+            Write-Error "Expected ARM64 Flutter Release directory at $src — Flutter probably built x64. Failing fast so we don't upload a mislabelled artifact."
             Get-ChildItem -Recurse -Directory ".\flutter\build" | Select-Object FullName
             exit 1
           }
-          Write-Host "Staging from $src"
           New-Item -ItemType Directory -Force -Path .\rustdesk | Out-Null
           Copy-Item "$src\*" .\rustdesk -Recurse -Force
           Get-ChildItem .\rustdesk | Select-Object Name, Length
+
+      - name: Verify rustdesk.exe is ARM64 (PE machine type 0xAA64)
+        # Guard against silent regressions to an x64 build: read the PE header
+        # of the staged exe + librustdesk.dll + flutter_windows.dll and fail
+        # the run if any of them is not aarch64.
+        shell: pwsh
+        run: |
+          $expected = 0xAA64
+          $targets  = @('rustdesk.exe', 'librustdesk.dll', 'flutter_windows.dll')
+          foreach ($name in $targets) {
+            $path = ".\rustdesk\$name"
+            if (-not (Test-Path $path)) { throw "missing $path" }
+            $bytes     = [System.IO.File]::ReadAllBytes($path)
+            $peOffset  = [BitConverter]::ToInt32($bytes, 0x3C)
+            $machine   = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+            $hex       = '0x{0:X4}' -f $machine
+            if ($machine -ne $expected) {
+              throw "$name PE machine = $hex (expected 0xAA64 / ARM64)"
+            }
+            Write-Host "$name PE machine = $hex (ARM64) OK"
+          }
 
       - name: Upload unsigned artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
