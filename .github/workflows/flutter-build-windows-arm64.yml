@@ -67,10 +67,31 @@ jobs:
           name: bridge-artifact
           path: ./
 
-      - name: Install LLVM and Clang
-        uses: KyleMayes/install-llvm-action@1a3da29f56261a1e1f937ec88f0856a9b8321d7e # v1
-        with:
-          version: ${{ env.LLVM_VERSION }}
+      - name: Diagnose runner environment
+        shell: pwsh
+        run: |
+          Write-Host "RUNNER_ARCH = $env:RUNNER_ARCH"
+          Write-Host "RUNNER_OS   = $env:RUNNER_OS"
+          Write-Host "PROCESSOR_ARCHITECTURE = $env:PROCESSOR_ARCHITECTURE"
+          Write-Host "PROCESSOR_ARCHITEW6432 = $env:PROCESSOR_ARCHITEW6432"
+          Write-Host "OSArchitecture: $([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)"
+          Write-Host "ProcessArchitecture: $([System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture)"
+
+      - name: Install LLVM and Clang (woa64 / ARM64 native)
+        # KyleMayes/install-llvm-action v1 ships an x64 libclang.dll on this
+        # runner — bindgen then refuses to load it ("invalid DLL (x86-64)").
+        # Install the official LLVM-on-Windows-ARM64 build directly instead.
+        shell: pwsh
+        run: |
+          $url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-${env:LLVM_VERSION}/LLVM-${env:LLVM_VERSION}-woa64.exe"
+          Write-Host "Downloading $url"
+          Invoke-WebRequest -Uri $url -OutFile "$env:RUNNER_TEMP\llvm-installer.exe"
+          Start-Process -FilePath "$env:RUNNER_TEMP\llvm-installer.exe" -ArgumentList '/S' -Wait -NoNewWindow
+          $llvmBin = "C:\Program Files\LLVM\bin"
+          "LIBCLANG_PATH=$llvmBin"     | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "LLVM_PATH=C:\Program Files\LLVM" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $llvmBin | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          & "$llvmBin\clang.exe" --version
 
       - name: Install Flutter (x64 SDK on ARM64 runner)
         uses: subosito/flutter-action@2783a3f08e1baf891508463f8c6653c258246225 # v2.12.0
@@ -88,12 +109,24 @@ jobs:
           flutter precache --windows
         shell: pwsh
 
-      - name: Install Rust toolchain (aarch64-pc-windows-msvc)
-        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
-        with:
-          toolchain: ${{ env.RUST_VERSION }}
-          targets: aarch64-pc-windows-msvc
-          components: "rustfmt"
+      - name: Install Rust toolchain (aarch64-pc-windows-msvc native host)
+        # dtolnay/rust-toolchain installs rustup detected as x86_64 host on
+        # this runner (because Node runs as x64 under emulation). Then cargo
+        # without `--target` produces x86_64 binaries, which makes magnum-opus
+        # pick up the wrong vcpkg triplet. Install rustup with the aarch64
+        # default-host flavour so cargo natively targets ARM64.
+        shell: pwsh
+        run: |
+          $url = "https://static.rust-lang.org/rustup/dist/aarch64-pc-windows-msvc/rustup-init.exe"
+          Invoke-WebRequest -Uri $url -OutFile "$env:RUNNER_TEMP\rustup-init.exe"
+          & "$env:RUNNER_TEMP\rustup-init.exe" -y `
+            --default-host aarch64-pc-windows-msvc `
+            --default-toolchain ${env:RUST_VERSION} `
+            --profile minimal `
+            --component rustfmt
+          "$env:USERPROFILE\.cargo\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          & "$env:USERPROFILE\.cargo\bin\rustup.exe" target add aarch64-pc-windows-msvc
+          & "$env:USERPROFILE\.cargo\bin\rustup.exe" show
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
