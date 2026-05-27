@@ -163,10 +163,16 @@ jobs:
         # First attempt deliberately disables hwcodec / vram features — those
         # bring in x86-tuned native code (nasm, nvenc) and are most likely to
         # fail first. Once base build is green we can layer them back in.
+        #
+        # SODIUM_LIB_DIR makes libsodium-sys 0.2.x skip its built-in MSVC
+        # "download a prebuilt libsodium.lib" path (which only exists for
+        # x86/x64) and instead link the libsodium we installed via vcpkg for
+        # arm64-windows-static.
         env:
           VCPKG_DEFAULT_HOST_TRIPLET: arm64-windows-static
           RUSTDESK_TARGET_ARCH: arm64
           FLUTTER_TARGET_PLATFORM: windows-arm64
+          SODIUM_LIB_DIR: C:\vcpkg\installed\arm64-windows-static\lib
         run: |
           python .\build.py --portable --flutter --skip-portable-pack
         shell: pwsh
