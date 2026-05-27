@@ -184,4 +184,31 @@ i.e. when run from a real ARM64 process it auto-downloads the arm64 dart-sdk. `s
   3. `flutter precache --windows --no-android --no-ios --no-linux --no-macos --no-web --no-fuchsia` (the windows-arm64-flutter.zip engine artifacts now exist for 3.44.0).
   4. Bump `FLUTTER_VERSION` env to `3.44.0`. Drop the `FLUTTER_TARGET_PLATFORM` env from the build step — host detection is now arm64 so `flutter build windows --release` does the right thing on its own.
 - Risk: rustdesk's Flutter side was last patched against 3.24.x. Jumping straight to 3.44.0 might surface pubspec/widget/API mismatches. Pubspec only constrains `sdk: '^3.1.0'` (passes Dart 3.12), so the most likely failure is a deprecated widget API. We'll see in the next run.
+- Run: https://github.com/johanclawson/rustdesk/actions/runs/26500599054
+- Result: ❌ failed at `flutter build windows --release`. **But cargo native ARM64 build succeeded** AND **Flutter is now producing `flutter\build\windows\arm64\...`** — the arch-detection plumbing works. 🎉
+- Errors are all Flutter 3.44 / Dart 3.12 API mismatches in the rustdesk Flutter code or its package pins:
+  ```
+  extended_text-14.0.0/lib/src/official/rendering/paragraph.dart(1124): The non-abstract class
+    '_SelectableFragment' is missing implementations for these members…
+  extended_text-14.0.0/lib/src/extended/selection_mixin.dart(89): The non-abstract class
+    '_ExtendedSelectableFragment' is missing implementations for these members…
+  lib/common.dart(384): The argument type 'DialogTheme' can't be assigned to
+    the parameter type 'DialogThemeData?'.
+  lib/common.dart(415): The argument type 'TabBarTheme' can't be assigned to
+    the parameter type 'TabBarThemeData?'.
+  google_fonts-6.2.1/lib/src/google_fonts_variant.dart(152): Constant evaluation error
+  ```
+
+### Dead-end check — earliest Flutter with ARM64 artifacts
+
+I walked engine hashes for every Flutter 3.27…3.44 stable + 3.42/3.43 betas; only **3.44.0** publishes `dart-sdk-windows-arm64.zip` and the `windows-arm64-*` engine artifacts. We can't downgrade to a Flutter that's gentler on rustdesk's Dart code.
+
+### Attempt 7 — forward-port rustdesk Flutter code to 3.44
+
+- Plan (surgical, minimal-diff):
+  1. `pubspec.yaml`: bump `extended_text 14.0.0` → `^15.0.2` (15.x supports Dart ≥3.7, the only version family that compiles on Flutter 3.44). Bump `google_fonts ^6.2.1` → `^8.0.0` (8.x is the current line, fixes the const-eval bug). Both packages' rustdesk usage is trivial (`ExtendedText(..., maxLines: 1)`, `GoogleFonts.robotoMono().fontFamily`), so no API-side changes expected.
+  2. `flutter/lib/common.dart`: rename the four `DialogTheme(…)` / `TabBarTheme(…)` constructor calls to `DialogThemeData(…)` / `TabBarThemeData(…)`. (Flutter 3.44 renamed the classes — the field names `dialogTheme:` / `tabBarTheme:` are unchanged.)
+  3. `flutter/lib/desktop/widgets/tabbar_widget.dart`: drop `hide TabBarTheme` from the material.dart import (the symbol no longer exists; nothing else in this file references it).
+  4. Add `flutter/**` and `libs/**` to the workflow's `paths:` trigger so Dart/Rust source changes re-run CI without a workflow edit.
+- Open question: there may be more 3.24→3.44 API drift past these three points. We'll know after the run.
 - Commit: pending
