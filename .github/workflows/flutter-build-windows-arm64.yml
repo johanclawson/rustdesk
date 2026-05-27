@@ -1,0 +1,159 @@
+name: Build the flutter version of RustDesk for Windows ARM64
+
+# Adds a native Windows-on-ARM build to the existing release pipeline.
+# Triggered manually for now; the upstream `flutter-build.yml` is left untouched
+# so the existing x64 release pipeline is not affected.
+#
+# References:
+#   - https://github.com/rustdesk/rustdesk/discussions/5532
+#   - GitHub-hosted `windows-11-arm` runner (free for public repos since 2025-04)
+
+on:
+  workflow_dispatch:
+    inputs:
+      upload-tag:
+        type: string
+        default: "nightly-arm64"
+  push:
+    branches:
+      - feat/windows-arm64-ci
+    paths:
+      - ".github/workflows/flutter-build-windows-arm64.yml"
+      - "build.py"
+      - ".cargo/config.toml"
+
+env:
+  # Pinned to the same versions the existing x64 build uses, so the only axis
+  # of difference is the target architecture.
+  RUST_VERSION: "1.75"
+  LLVM_VERSION: "15.0.6"
+  FLUTTER_VERSION: "3.24.5"
+  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+  VCPKG_COMMIT_ID: "120deac3062162151622ca4860575a33844ba10b"
+  VERSION: "1.4.6"
+  TAG_NAME: "${{ inputs.upload-tag || 'nightly-arm64' }}"
+
+jobs:
+  # Reuse the existing Linux-based bridge generation job — its output is
+  # platform-independent Dart/Rust glue code.
+  generate-bridge:
+    uses: ./.github/workflows/bridge.yml
+
+  build-windows-arm64:
+    name: aarch64-pc-windows-msvc
+    needs: [generate-bridge]
+    runs-on: windows-11-arm
+    steps:
+      - name: Export GitHub Actions cache environment variables
+        uses: actions/github-script@d7906e4ad0b1822421a7e6a35d5ca353c962f410 # v6
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - name: Checkout source code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          submodules: recursive
+
+      - name: Restore bridge files
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: bridge-artifact
+          path: ./
+
+      - name: Install LLVM and Clang
+        uses: KyleMayes/install-llvm-action@1a3da29f56261a1e1f937ec88f0856a9b8321d7e # v1
+        with:
+          version: ${{ env.LLVM_VERSION }}
+
+      - name: Install Flutter
+        uses: subosito/flutter-action@2783a3f08e1baf891508463f8c6653c258246225 # v2.12.0
+        with:
+          channel: "stable"
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+
+      - name: Show flutter / toolchain info
+        run: |
+          flutter doctor -v
+          flutter precache --windows
+        shell: pwsh
+
+      - name: Patch Flutter (3.24.5 dropdown filter)
+        shell: bash
+        run: |
+          cp .github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff $(dirname $(dirname $(which flutter)))
+          cd $(dirname $(dirname $(which flutter)))
+          [[ "3.24.5" == "${{ env.FLUTTER_VERSION }}" ]] && git apply flutter_3.24.4_dropdown_menu_enableFilter.diff || true
+
+      - name: Install Rust toolchain (aarch64-pc-windows-msvc)
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: aarch64-pc-windows-msvc
+          components: "rustfmt"
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          prefix-key: windows-11-arm
+
+      - name: Setup vcpkg with Github Actions binary cache
+        uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2 # v11
+        with:
+          vcpkgDirectory: C:\vcpkg
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+          doNotCache: false
+
+      - name: Install vcpkg dependencies (arm64-windows-static)
+        env:
+          VCPKG_DEFAULT_HOST_TRIPLET: arm64-windows-static
+        run: |
+          if ! $VCPKG_ROOT/vcpkg \
+            install \
+            --triplet arm64-windows-static \
+            --x-install-root="$VCPKG_ROOT/installed"; then
+            find "${VCPKG_ROOT}/" -name "*.log" | while read -r _1; do
+              echo "$_1:"
+              echo "======"
+              cat "$_1"
+              echo "======"
+              echo ""
+            done
+            exit 1
+          fi
+          head -n 100 "${VCPKG_ROOT}/buildtrees/ffmpeg/build-arm64-windows-static-rel-out.log" || true
+        shell: bash
+
+      - name: Build RustDesk (flutter, ARM64, no hwcodec/vram)
+        # First attempt deliberately disables hwcodec / vram features — those
+        # bring in x86-tuned native code (nasm, nvenc) and are most likely to
+        # fail first. Once base build is green we can layer them back in.
+        env:
+          VCPKG_DEFAULT_HOST_TRIPLET: arm64-windows-static
+          RUSTDESK_TARGET_ARCH: arm64
+        run: |
+          python .\build.py --portable --flutter --skip-portable-pack
+        shell: pwsh
+
+      - name: Stage release tree
+        shell: pwsh
+        run: |
+          $arm = ".\flutter\build\windows\arm64\runner\Release"
+          $x64 = ".\flutter\build\windows\x64\runner\Release"
+          $src = if (Test-Path $arm) { $arm } elseif (Test-Path $x64) { $x64 } else { $null }
+          if (-not $src) {
+            Write-Error "No Flutter Release directory found under flutter/build/windows/"
+            Get-ChildItem -Recurse -Directory ".\flutter\build" | Select-Object FullName
+            exit 1
+          }
+          Write-Host "Staging from $src"
+          New-Item -ItemType Directory -Force -Path .\rustdesk | Out-Null
+          Copy-Item "$src\*" .\rustdesk -Recurse -Force
+          Get-ChildItem .\rustdesk | Select-Object Name, Length
+
+      - name: Upload unsigned artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rustdesk-unsigned-windows-aarch64
+          path: rustdesk
+          if-no-files-found: error
