@@ -21,6 +21,7 @@ on:
       - ".github/workflows/flutter-build-windows-arm64.yml"
       - "build.py"
       - ".cargo/config.toml"
+      - "vcpkg.json"
 
 env:
   # Pinned to the same versions the existing x64 build uses, so the only axis
