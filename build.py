@@ -16,16 +16,12 @@ osx = platform.platform().startswith(
     'Darwin') or platform.platform().startswith("macOS")
 hbb_name = 'rustdesk' + ('.exe' if windows else '')
 exe_path = 'target/release/' + hbb_name
-# RUSTDESK_TARGET_ARCH lets CI override the Flutter build subdir for non-x64 hosts
-# (e.g. native Windows-on-ARM, where Flutter emits to build/windows/arm64/...).
-_windows_arch = (os.environ.get("RUSTDESK_TARGET_ARCH") or "").lower()
-if not _windows_arch and windows:
-    _machine = platform.machine().lower()
-    if _machine in ("arm64", "aarch64"):
-        _windows_arch = "arm64"
-    else:
-        _windows_arch = "x64"
 if windows:
+    # Flutter emits to build/windows/<arch>/runner/Release on Windows; derive
+    # the arch from the host so native Windows-on-ARM builds land in the right
+    # subdir without breaking the existing x64 path.
+    _machine = platform.machine().lower()
+    _windows_arch = "arm64" if _machine in ("arm64", "aarch64") else "x64"
     flutter_build_dir = f'build/windows/{_windows_arch}/runner/Release/'
 elif osx:
     flutter_build_dir = 'build/macos/Build/Products/Release/'
@@ -447,11 +443,7 @@ def build_flutter_windows(version, features, skip_portable_pack):
             print("cargo build failed, please check rust source code.")
             exit(-1)
     os.chdir('flutter')
-    # FLUTTER_TARGET_PLATFORM lets CI pass through --target-platform
-    # (e.g. windows-arm64 on a native ARM64 builder).
-    _target_platform = os.environ.get("FLUTTER_TARGET_PLATFORM", "").strip()
-    _platform_arg = f' --target-platform={_target_platform}' if _target_platform else ''
-    system2(f'flutter build windows{_platform_arg} --release')
+    system2('flutter build windows --release')
     os.chdir('..')
     shutil.copy2('target/release/deps/dylib_virtual_display.dll',
                  flutter_build_dir_2)
