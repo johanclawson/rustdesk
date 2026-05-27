@@ -105,3 +105,35 @@ Each attempt below is a commit on this branch. The goal of each iteration is to 
 - Plan:
   1. Add `libsodium` to `vcpkg.json` gated to `arm64 & windows & static` (does not touch the x64 build path).
   2. Export `SODIUM_LIB_DIR=C:\vcpkg\installed\arm64-windows-static\lib` for the build step. libsodium-sys will then pick up the ARM64 `libsodium.lib` vcpkg just produced.
+- Run: https://github.com/johanclawson/rustdesk/actions/runs/26496990390
+- Result: ❌ failed during `magnum-opus` build script with `opus_multistream.h not found`.
+- Diagnosis turn-up: `magnum-opus/build.rs` (and `libs/scrap/build.rs`, and `rustdesk-org/hwcodec/build.rs`) all contain the same bug:
+  ```rust
+  } else if target_os == "windows" {
+      "x64-windows-static".to_owned()   // ← hard-coded, ignores target_arch
+  }
+  ```
+  i.e. they detect `aarch64` correctly but then throw it away for any Windows target. Result: every vcpkg lookup goes to `C:\vcpkg\installed\x64-windows-static\…` and finds nothing (we only installed `arm64-windows-static`). The libsodium fix from Attempt 3 *did* work — the link error never even reproduced because `magnum-opus` now fails before linking.
+
+### Proactive audit (before attempt 5)
+
+Survey of every build.rs that participates in the active build:
+
+| location | bug | active here? |
+|---|---|---|
+| `libs/scrap/build.rs` | hard-codes `x64-windows-static` | yes |
+| `rustdesk-org/magnum-opus@5cd2bf98/build.rs` | hard-codes `x64-windows-static` | yes |
+| `rustdesk-org/hwcodec@398e5a89/build.rs` | hard-codes `x64-windows-static` | no — feature `hwcodec` is off |
+| `rustdesk-org/cpal`, `kcp-sys`, `impersonate-system`, `rdev`, `arboard`, `clipboard-master`, `The-Fat-Controller`, `nokhwa-bindings-windows` | none touch vcpkg triplets | yes |
+| `libs/enigo`, `libs/clipboard`, `libs/virtual_display/dylib` build.rs | only `cfg(target_os)`, no triplets | yes |
+| `libs/hbb_common/build.rs` | only `protobuf_codegen` | yes |
+| `libsodium-sys 0.2.7` | downloads x64 prebuilt | yes — already mitigated by `SODIUM_LIB_DIR` |
+
+### Attempt 5 — fix the triplet hard-coding in our copy of scrap, alias for the rest
+
+- Plan:
+  1. Patch `libs/scrap/build.rs` line 49–50: replace the literal `"x64-windows-static"` with `format!("{}-windows-static", target_arch)`. This is upstream-PR-worthy and avoids the workaround for at least one crate.
+  2. For the external git deps we can't trivially patch from this branch (`magnum-opus`, plus `hwcodec` if/when we re-enable it), add a workflow step that creates an NTFS directory junction `C:\vcpkg\installed\x64-windows-static → C:\vcpkg\installed\arm64-windows-static`. Whatever the hard-coded crates point at is now backed by the ARM64 libraries — including a libsodium.lib at the x64 path, which means our `SODIUM_LIB_DIR` env from Attempt 4 keeps working.
+- Follow-ups for the eventual upstream PR (separate from getting *this* build green):
+  - Send PRs to `rustdesk-org/magnum-opus`, `rustdesk-org/hwcodec`, and any other rustdesk fork with the same `else if target_os == "windows" { "x64-windows-static" }` pattern.
+- Commit: pending
