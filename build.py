@@ -16,8 +16,17 @@ osx = platform.platform().startswith(
     'Darwin') or platform.platform().startswith("macOS")
 hbb_name = 'rustdesk' + ('.exe' if windows else '')
 exe_path = 'target/release/' + hbb_name
+# RUSTDESK_TARGET_ARCH lets CI override the Flutter build subdir for non-x64 hosts
+# (e.g. native Windows-on-ARM, where Flutter emits to build/windows/arm64/...).
+_windows_arch = (os.environ.get("RUSTDESK_TARGET_ARCH") or "").lower()
+if not _windows_arch and windows:
+    _machine = platform.machine().lower()
+    if _machine in ("arm64", "aarch64"):
+        _windows_arch = "arm64"
+    else:
+        _windows_arch = "x64"
 if windows:
-    flutter_build_dir = 'build/windows/x64/runner/Release/'
+    flutter_build_dir = f'build/windows/{_windows_arch}/runner/Release/'
 elif osx:
     flutter_build_dir = 'build/macos/Build/Products/Release/'
 else:
