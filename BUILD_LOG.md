@@ -86,4 +86,22 @@ Each attempt below is a commit on this branch. The goal of each iteration is to 
   1. Replace `install-llvm-action` with a manual `pwsh` step that downloads `LLVM-15.0.6-woa64.exe` directly and silent-installs it, then exports `LIBCLANG_PATH` so bindgen finds the ARM64 dll.
   2. Replace `dtolnay/rust-toolchain` with a manual `rustup-init.exe` from `static.rust-lang.org/rustup/dist/aarch64-pc-windows-msvc/`, passing `--default-host aarch64-pc-windows-msvc`. Now plain `cargo build` natively targets ARM64.
   3. Add a one-shot "Diagnose runner environment" step so future debugging has the raw `RUNNER_ARCH` / `RuntimeInformation` answers in the log.
-- Commit: pending
+- Run: https://github.com/johanclawson/rustdesk/actions/runs/26495736490
+- Result: ❌ failed during link of `rustdesk` build script with 132 unresolved `libsodium` symbols.
+- What worked:
+  - ✅ Native woa64 LLVM installed (clang.exe reports ARM64).
+  - ✅ rustup installed with `aarch64-pc-windows-msvc` as the *default host*.
+  - ✅ vcpkg-rs in build scripts now reports `cargo:info=arm64-windows-static` — `magnum-opus` linked cleanly.
+- Error:
+  ```
+  liblibsodium_sys-...rlib : warning LNK4272: library machine type 'x64' conflicts with target machine type 'ARM64'
+  unresolved external symbol crypto_box_easy ... (× 132)
+  ```
+- Diagnosis: `libsodium-sys = "0.2.7"` (transitive via `sodiumoxide`) bundles a "download prebuilt libsodium.lib" path on MSVC. The Jedisct1 distribution only ships x86 + x64 prebuilts, so on aarch64 it downloads the x64 .lib and tries to link it anyway. The `LNK4272` warning is the smoking gun.
+- libsodium-sys's `build.rs` (verified upstream) honours `SODIUM_LIB_DIR` and will then link `libsodium.lib` from that directory instead of downloading anything.
+
+### Attempt 4 — vcpkg arm64 libsodium + `SODIUM_LIB_DIR`
+
+- Plan:
+  1. Add `libsodium` to `vcpkg.json` gated to `arm64 & windows & static` (does not touch the x64 build path).
+  2. Export `SODIUM_LIB_DIR=C:\vcpkg\installed\arm64-windows-static\lib` for the build step. libsodium-sys will then pick up the ARM64 `libsodium.lib` vcpkg just produced.
