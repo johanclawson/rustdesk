@@ -38,8 +38,20 @@ Each attempt below is a commit on this branch. The goal of each iteration is to 
 ### Attempt 1 — Initial workflow
 
 - Date: 2026-05-27
+- Run: https://github.com/johanclawson/rustdesk/actions/runs/26493736986
+- Result: ❌ failed at "Install Flutter" step.
+- Error: `Unable to determine Flutter version for channel: stable version: 3.24.5 architecture: arm64`
+- Diagnosis: `subosito/flutter-action` auto-detects `RUNNER_ARCH=ARM64` on the `windows-11-arm` runner and tries to download an ARM64 Flutter SDK. **Flutter does not publish a Windows-on-ARM SDK** — the official releases JSON (`storage.googleapis.com/flutter_infra_release/releases/releases_windows.json`) contains *zero* `dart_sdk_arch=arm64` entries for any channel. The x64 SDK runs fine on Windows-11-ARM under emulation; the lack of an ARM64 SDK only means we cannot host-build at native speed, not that we cannot cross-build ARM64 apps.
+- Bridge job: ✅ succeeded (so the bridge.yml dependency works).
+
+### Attempt 2 — pin Flutter 3.32.8, x64 SDK, ARM64 cross-build
+
+- Plan:
+  1. Bump `FLUTTER_VERSION` to **3.32.8** (Dart 3.8.1 — has stable Windows-ARM64 cross-build target since 3.32).
+  2. Pass `architecture: x64` explicitly to `subosito/flutter-action` so it stops trying to find an ARM64 SDK.
+  3. Drop the `flutter_3.24.4_dropdown_menu_enableFilter.diff` patch step — that diff targets the 3.24.x dropdown source and won't apply cleanly on 3.32.
+  4. Plumb `FLUTTER_TARGET_PLATFORM=windows-arm64` through `build.py` → `flutter build windows --target-platform=windows-arm64 --release`.
+  5. **Preemptive** vcpkg.json fix: restrict `ffmpeg`, `mfx-dispatch`, and the FFmpeg `amf`/`nvcodec`/`qsv` features to `(x86 | x64) & windows` so they no longer activate on `arm64-windows-static`. (Even at the cost of `hwcodec`/`vram` on ARM64 — we're not building those features on this branch anyway, and the upstream port hard-blocks `nvcodec` on `arm64 & windows`.)
 - Commit: pending
-- Workflow file: `.github/workflows/flutter-build-windows-arm64.yml`
-- Notes: First end-to-end attempt. Uses `windows-11-arm` runner, stock Flutter engine, no `hwcodec`/`vram` features, no MSI, no signing. Expected to fail somewhere — the goal is to capture *where* and iterate.
 
 (Subsequent attempts will be appended here.)
