@@ -136,4 +136,52 @@ Survey of every build.rs that participates in the active build:
   2. For the external git deps we can't trivially patch from this branch (`magnum-opus`, plus `hwcodec` if/when we re-enable it), add a workflow step that creates an NTFS directory junction `C:\vcpkg\installed\x64-windows-static → C:\vcpkg\installed\arm64-windows-static`. Whatever the hard-coded crates point at is now backed by the ARM64 libraries — including a libsodium.lib at the x64 path, which means our `SODIUM_LIB_DIR` env from Attempt 4 keeps working.
 - Follow-ups for the eventual upstream PR (separate from getting *this* build green):
   - Send PRs to `rustdesk-org/magnum-opus`, `rustdesk-org/hwcodec`, and any other rustdesk fork with the same `else if target_os == "windows" { "x64-windows-static" }` pattern.
+- Run: https://github.com/johanclawson/rustdesk/actions/runs/26498557896
+- Result: ❌ failed at `flutter build windows --target-platform=windows-arm64 --release`. Cargo build of `librustdesk.dll` for `aarch64-pc-windows-msvc` SUCCEEDED ("Finished release [optimized] target(s) in 8m 52s"). 🎉
+- New error:
+  ```
+  Could not find an option named "--target-platform".
+  ```
+- Diagnosis: `flutter build windows` does NOT accept `--target-platform` in any Flutter version (3.32, 3.44 stable, master). Reading `packages/flutter_tools/lib/src/commands/build_windows.dart`:
+  ```dart
+  final defaultTargetPlatform =
+      (_operatingSystemUtils.hostPlatform == HostPlatform.windows_arm64)
+          ? 'windows-arm64' : 'windows-x64';
+  ```
+  And `lib/src/base/os.dart`:
+  ```dart
+  final abi = Abi.current();
+  _hostPlatform = (abi == Abi.windowsArm64) ? HostPlatform.windows_arm64
+                                            : HostPlatform.windows_x64;
+  ```
+  `Abi.current()` is a **compile-time** property of the Dart VM. So the x64 Flutter SDK (which subosito/flutter-action installs) ALWAYS reports x64 and ALWAYS builds windows-x64, irrespective of host emulation, env vars, or flags. **The only way to produce a windows-arm64 build is with an ARM64 Dart VM in the Flutter SDK.**
+
+### Discovery — Flutter ARM64 artifacts ship for 3.44.0+
+
+A walk of `https://storage.googleapis.com/storage/v1/b/flutter_infra_release/o?prefix=flutter/<engine>/`:
+
+| Flutter ver | engine hash | `dart-sdk-windows-arm64.zip` | `windows-arm64-*` engine zips |
+|---|---|---|---|
+| 3.32.8 | ef0cd00091… | ❌ | ❌ (only `windows-x64-*`) |
+| **3.44.0** | 4c525dac5e… | ✅ | ✅ (`debug` / `profile` / `release`) |
+
+So Flutter 3.44.0 is the first stable whose engine actually publishes the ARM64 Windows desktop artifacts.
+
+And `flutter/bin/internal/update_dart_sdk.ps1` does this:
+```powershell
+if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") {
+    $dartSdkArm64Url = "$dartSdkBaseUrl/flutter_infra_release/flutter/$engineVersion/$dartZipNameArm64"
+    ...
+}
+```
+i.e. when run from a real ARM64 process it auto-downloads the arm64 dart-sdk. `subosito/flutter-action` ships a *pre-extracted* x64 zip whose bundled dart-sdk matches the version stamp, so update_dart_sdk.ps1 never runs and we're stuck on x64. But if we `git clone` Flutter ourselves (no bundled dart-sdk), the first `flutter --version` triggers update_dart_sdk.ps1 — and pwsh on the windows-11-arm runner runs as native ARM64 (`PROCESSOR_ARCHITECTURE=ARM64`), so we get the arm64 sdk.
+
+### Attempt 6 — git-clone Flutter 3.44.0 so bootstrap pulls ARM64 dart-sdk
+
+- Plan:
+  1. Drop `subosito/flutter-action`. Replace with a pwsh step that does `git clone --depth=1 --branch 3.44.0 https://github.com/flutter/flutter.git C:\flutter` and prepends `C:\flutter\bin` to PATH.
+  2. Run `flutter --version` once (triggers `update_dart_sdk.ps1`, downloads `dart-sdk-windows-arm64.zip`).
+  3. `flutter precache --windows --no-android --no-ios --no-linux --no-macos --no-web --no-fuchsia` (the windows-arm64-flutter.zip engine artifacts now exist for 3.44.0).
+  4. Bump `FLUTTER_VERSION` env to `3.44.0`. Drop the `FLUTTER_TARGET_PLATFORM` env from the build step — host detection is now arm64 so `flutter build windows --release` does the right thing on its own.
+- Risk: rustdesk's Flutter side was last patched against 3.24.x. Jumping straight to 3.44.0 might surface pubspec/widget/API mismatches. Pubspec only constrains `sdk: '^3.1.0'` (passes Dart 3.12), so the most likely failure is a deprecated widget API. We'll see in the next run.
 - Commit: pending

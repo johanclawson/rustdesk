@@ -28,11 +28,16 @@ env:
   # of difference is the target architecture.
   RUST_VERSION: "1.75"
   LLVM_VERSION: "15.0.6"
-  # Flutter does not yet publish a Windows-on-ARM SDK; we install the x64
-  # toolchain (runs fine under Windows-11-ARM emulation) and cross-build the
-  # app for ARM64 via --target-platform=windows-arm64. 3.32.x ships Dart 3.8
-  # which has stable Windows-ARM64 cross-build support.
-  FLUTTER_VERSION: "3.32.8"
+  # Flutter's `build windows` target is decided by the host arch (Abi.current()
+  # in dart:ffi — a compile-time property of the bundled Dart VM). To produce
+  # a windows-arm64 build we therefore need an arm64 Dart VM.  We install
+  # Flutter from git (no bundled dart-sdk) and let its own update_dart_sdk.ps1
+  # fetch the arm64 sdk based on $env:PROCESSOR_ARCHITECTURE — which is "ARM64"
+  # in native pwsh on the windows-11-arm runner.
+  #
+  # 3.44.0 is the first stable whose engine ships windows-arm64 artifacts
+  # (dart-sdk-windows-arm64.zip, windows-arm64-flutter.zip, etc.).
+  FLUTTER_VERSION: "3.44.0"
   VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
   VCPKG_COMMIT_ID: "120deac3062162151622ca4860575a33844ba10b"
   VERSION: "1.4.6"
@@ -93,21 +98,35 @@ jobs:
           $llvmBin | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
           & "$llvmBin\clang.exe" --version
 
-      - name: Install Flutter (x64 SDK on ARM64 runner)
-        uses: subosito/flutter-action@2783a3f08e1baf891508463f8c6653c258246225 # v2.12.0
-        with:
-          channel: "stable"
-          flutter-version: ${{ env.FLUTTER_VERSION }}
-          # Override the action's auto-detected ARM64 — Flutter does not
-          # publish an ARM64 Windows SDK; the x64 SDK runs via emulation and
-          # cross-builds ARM64 apps via --target-platform=windows-arm64.
-          architecture: x64
+      - name: Install Flutter from git (lets bootstrap pick ARM64 dart-sdk)
+        # subosito/flutter-action downloads a pre-built x64 zip and the
+        # bundled x64 dart-sdk would force every later `flutter build windows`
+        # to produce an x64 binary (Abi.current() is compile-time). Clone
+        # Flutter directly so its own update_dart_sdk.ps1 runs under native
+        # ARM64 pwsh on the windows-11-arm runner, sees
+        # $env:PROCESSOR_ARCHITECTURE=ARM64, and downloads the ARM64 dart-sdk.
+        shell: pwsh
+        run: |
+          $flutterRoot = "C:\flutter"
+          if (Test-Path $flutterRoot) { Remove-Item -Recurse -Force $flutterRoot }
+          git clone --depth=1 --branch ${env:FLUTTER_VERSION} https://github.com/flutter/flutter.git $flutterRoot
+          "$flutterRoot\bin"                              | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          "$flutterRoot\bin\cache\dart-sdk\bin"           | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          $env:Path = "$flutterRoot\bin;$flutterRoot\bin\cache\dart-sdk\bin;$env:Path"
+          # First flutter invocation triggers update_dart_sdk.ps1, which checks
+          # PROCESSOR_ARCHITECTURE and downloads the matching dart-sdk-windows-*.zip.
+          Write-Host "PROCESSOR_ARCHITECTURE = $env:PROCESSOR_ARCHITECTURE"
+          flutter --version
+          Write-Host "---bundled dart abi---"
+          & "$flutterRoot\bin\cache\dart-sdk\bin\dart.exe" --version
 
-      - name: Show flutter / toolchain info and precache engines
+      - name: Precache Windows engines (will pick arm64 because Abi=arm64)
+        shell: pwsh
         run: |
           flutter doctor -v
-          flutter precache --windows
-        shell: pwsh
+          flutter config --enable-windows-desktop
+          flutter precache --windows --no-android --no-ios --no-linux --no-macos --no-web --no-fuchsia
+          Get-ChildItem "C:\flutter\bin\cache\artifacts\engine\" | Select-Object Name
 
       - name: Install Rust toolchain (aarch64-pc-windows-msvc native host)
         # dtolnay/rust-toolchain installs rustup detected as x86_64 host on
@@ -190,7 +209,8 @@ jobs:
         env:
           VCPKG_DEFAULT_HOST_TRIPLET: arm64-windows-static
           RUSTDESK_TARGET_ARCH: arm64
-          FLUTTER_TARGET_PLATFORM: windows-arm64
+          # `flutter build windows` picks its target from Abi.current(), and we
+          # now run an ARM64 dart VM, so it builds windows-arm64 automatically.
           SODIUM_LIB_DIR: C:\vcpkg\installed\arm64-windows-static\lib
         run: |
           python .\build.py --portable --flutter --skip-portable-pack
