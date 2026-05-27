@@ -27,7 +27,11 @@ env:
   # of difference is the target architecture.
   RUST_VERSION: "1.75"
   LLVM_VERSION: "15.0.6"
-  FLUTTER_VERSION: "3.24.5"
+  # Flutter does not yet publish a Windows-on-ARM SDK; we install the x64
+  # toolchain (runs fine under Windows-11-ARM emulation) and cross-build the
+  # app for ARM64 via --target-platform=windows-arm64. 3.32.x ships Dart 3.8
+  # which has stable Windows-ARM64 cross-build support.
+  FLUTTER_VERSION: "3.32.8"
   VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
   VCPKG_COMMIT_ID: "120deac3062162151622ca4860575a33844ba10b"
   VERSION: "1.4.6"
@@ -67,24 +71,21 @@ jobs:
         with:
           version: ${{ env.LLVM_VERSION }}
 
-      - name: Install Flutter
+      - name: Install Flutter (x64 SDK on ARM64 runner)
         uses: subosito/flutter-action@2783a3f08e1baf891508463f8c6653c258246225 # v2.12.0
         with:
           channel: "stable"
           flutter-version: ${{ env.FLUTTER_VERSION }}
+          # Override the action's auto-detected ARM64 — Flutter does not
+          # publish an ARM64 Windows SDK; the x64 SDK runs via emulation and
+          # cross-builds ARM64 apps via --target-platform=windows-arm64.
+          architecture: x64
 
-      - name: Show flutter / toolchain info
+      - name: Show flutter / toolchain info and precache engines
         run: |
           flutter doctor -v
           flutter precache --windows
         shell: pwsh
-
-      - name: Patch Flutter (3.24.5 dropdown filter)
-        shell: bash
-        run: |
-          cp .github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff $(dirname $(dirname $(which flutter)))
-          cd $(dirname $(dirname $(which flutter)))
-          [[ "3.24.5" == "${{ env.FLUTTER_VERSION }}" ]] && git apply flutter_3.24.4_dropdown_menu_enableFilter.diff || true
 
       - name: Install Rust toolchain (aarch64-pc-windows-msvc)
         uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
@@ -131,6 +132,7 @@ jobs:
         env:
           VCPKG_DEFAULT_HOST_TRIPLET: arm64-windows-static
           RUSTDESK_TARGET_ARCH: arm64
+          FLUTTER_TARGET_PLATFORM: windows-arm64
         run: |
           python .\build.py --portable --flutter --skip-portable-pack
         shell: pwsh
