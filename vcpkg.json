@@ -86,11 +86,6 @@
       "name": "libsodium",
       "host": false,
       "platform": "arm64 & windows & static"
-    },
-    {
-      "name": "libsodium",
-      "host": true,
-      "platform": "arm64 & windows & static"
     }
   ],
   "vcpkg-configuration": {
