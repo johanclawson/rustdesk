@@ -225,4 +225,40 @@ I walked engine hashes for every Flutter 3.27…3.44 stable + 3.42/3.43 betas; o
 - Plan:
   - In `bridge.yml`, broaden the sed to also rewrite `extended_text: ^15.x` → `13.0.0` and `google_fonts: ^8.x` → `^6.2.1` just for the bridge run. The actual ARM64 build still sees the real `^15.0.2` / `^8.0.0`.
 - This change to bridge.yml is bridge-job-local — the generated bridge files only depend on `src/flutter_ffi.rs`, not on which pubspec versions resolve.
-- Commit: pending
+- Run: https://github.com/johanclawson/rustdesk/actions/runs/26506730513
+- Result: ✅ **GREEN, end to end.** Both bridge and the ARM64 build job succeeded.
+- Artifact: `rustdesk-unsigned-windows-aarch64` (29.2 MB) — produced 16 files (rustdesk.exe, librustdesk.dll, flutter_windows.dll, a handful of plugin dlls, the `data/` flutter assets bundle).
+- PE machine-type verification (locally, `pwsh` on a known-ARM64 host):
+  - `rustdesk.exe` machine = `0xAA64` (ARM64) ✓
+  - `librustdesk.dll` machine = `0xAA64` (ARM64) ✓
+  - `flutter_windows.dll` machine = `0xAA64` (ARM64) ✓
+
+## Status: working native Windows-on-ARM build
+
+| Layer | Status |
+|---|---|
+| `windows-11-arm` runner setup (LLVM woa64, rustup `--default-host aarch64-pc-windows-msvc`, vcpkg arm64-windows-static) | ✅ |
+| `magnum-opus` / `scrap` x64 hard-coded triplet | ✅ (in-repo patch + workflow junction) |
+| `libsodium-sys` x64 prebuilt download | ✅ (`SODIUM_LIB_DIR` → vcpkg arm64) |
+| Cargo `aarch64-pc-windows-msvc` build of `librustdesk.dll` | ✅ |
+| Flutter ARM64 SDK + engine | ✅ (git-clone 3.44.0 → bootstrap fetches arm64 dart-sdk because pwsh is native ARM64; `windows-arm64-flutter.zip` engine pulled by precache) |
+| Rustdesk Flutter app builds on Flutter 3.44 | ✅ (pubspec bumps + `DialogTheme`/`TabBarTheme` renames) |
+| Bridge job still passes on Flutter 3.22.3 | ✅ (extended sed back-ports pubspec lines for bridge only) |
+| Native ARM64 .exe / dll trio produced | ✅ |
+| MSI / signing / `RustDeskTempTopMostWindow` / hwcodec / vram / virtual_display driver / printer driver | ⚠️ deferred (not needed for "running executable") |
+
+## Follow-ups before sending an upstream PR
+
+These three are local-only and need to go *upstream* before the workflow can be PR'd cleanly:
+
+1. Send PRs to `rustdesk-org/magnum-opus` and `rustdesk-org/hwcodec` to make their `build.rs` derive the vcpkg triplet from `target_arch` on Windows instead of hard-coding `"x64-windows-static"`. Once merged, the workflow's NTFS junction step can be deleted.
+2. Decide upstream whether to upgrade rustdesk's Flutter side to 3.44.x; until then, our pubspec/`common.dart`/`tabbar_widget.dart` changes shouldn't go in master.
+3. Re-enable `hwcodec` and `vram` on arm64-windows once `rustdesk-org/hwcodec`'s triplet bug is fixed and FFmpeg's hardware codec story on Windows-ARM is sorted (currently the FFmpeg port hard-blocks `nvcodec` / `qsv` / `amf` on arm64-windows; some can be replaced by Windows' Media Foundation H.264 encoder which *is* available on ARM).
+
+The two clean, PR-ready commits we already have:
+- `build: make flutter windows output path arch-aware`
+- `cargo: add aarch64-pc-windows-msvc rustflags`
+- `scrap: build vcpkg triplet from target_arch on Windows too`
+- `vcpkg: gate Intel-only ports + ffmpeg HW accel to x86/x64`
+
+Those four are PR-friendly to rustdesk/rustdesk by themselves.
