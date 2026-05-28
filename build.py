@@ -17,7 +17,12 @@ osx = platform.platform().startswith(
 hbb_name = 'rustdesk' + ('.exe' if windows else '')
 exe_path = 'target/release/' + hbb_name
 if windows:
-    flutter_build_dir = 'build/windows/x64/runner/Release/'
+    # Flutter emits to build/windows/<arch>/runner/Release on Windows; derive
+    # the arch from the host so native Windows-on-ARM builds land in the right
+    # subdir without breaking the existing x64 path.
+    _machine = platform.machine().lower()
+    _windows_arch = "arm64" if _machine in ("arm64", "aarch64") else "x64"
+    flutter_build_dir = f'build/windows/{_windows_arch}/runner/Release/'
 elif osx:
     flutter_build_dir = 'build/macos/Build/Products/Release/'
 else:
